@@ -1,5 +1,6 @@
 package com.hbc
 
+import java.sql.DriverManager
 import java.util
 import java.util.Properties
 
@@ -53,10 +54,8 @@ case class IntellicheckConsumerClass(val servers:String,
     props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, deserializer)
     props.put(ConsumerConfig.GROUP_ID_CONFIG, groupid)
     props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffset)
-    //props.put("specific.avro.reader", specificAvroReader)
     props.put("schema.registry.url", schemaRegestry)
-    props.put("consumer-timeout-ms", "30000")
-    //props.put("session.timeout.ms", "300000")
+    props.put("consumer.timeout.ms", "30000")
     props
   }
 
@@ -82,8 +81,9 @@ case class IntellicheckConsumerClass(val servers:String,
         val header  = data.get("header").toString
         val body:String = data.get("body_records").toString
         info("filtering the records only having intellicheck columns.")
-        if(body.contains("hbc_scan_time")){
-          val icolnames = jprops.getProperty(env + ".dcolumns").split(",").toList
+        val icolnames = jprops.getProperty(env + ".dcolumns").split(",").toList
+        val boolist = icolnames.map(x => body.contains(x))
+        if(!boolist.contains(false)){
           val hcolnames = jprops.getProperty(env + ".hcolumns").split(",").toList
           info("creating dataframe for header records")
           val hdf = hfilter(header,hcolnames, spark )
@@ -103,7 +103,9 @@ case class IntellicheckConsumerClass(val servers:String,
         }else{
           warn(s"intellicheck records not found for offser valiue ${record.offset()}")
         }
-      }}
+      }
+    }
+    conSumer.close()
   }
 
 
@@ -120,7 +122,6 @@ case class IntellicheckConsumerClass(val servers:String,
     import spark.implicits._
     val df = spark.read.json(Seq(jsonstring).toDS)
     val df1 = df.select(columns.head, columns.tail: _*)
-    //if(body.contains("hbc_payment_svce_swipecode"))
     val dffinal = df1.na.drop()
     val df2 = dffinal.withColumn("joinc", lit(1))
     df2
@@ -163,6 +164,20 @@ case class IntellicheckConsumerClass(val servers:String,
     val table = jprops.getProperty(env + ".teratable")
     df.write.mode("append").jdbc(url, table, prop)
   }
+
+  def TruncTeradata(jprops: Properties, env : String)={
+    Class.forName(jprops.getProperty(env + ".teradriver"))
+    val user = jprops.getProperty(env + ".terauser")
+    val password = jprops.getProperty(env + ".terapassword")
+    val ip = jprops.getProperty(env + ".teraip")
+    val database = jprops.getProperty(env + ".teradatabase")
+    val url = "jdbc:teradata://" + ip + "/database=" + database + ", TMODE=TERA"
+    val table = jprops.getProperty(env + ".teratable")
+    val query = s"DELETE ${database}.${table} ALL"
+    val conn = DriverManager.getConnection(url, user, password)
+    val stmt = conn.prepareStatement(query)
+    stmt.executeUpdate()
+  }
 }
 
 
@@ -193,7 +208,18 @@ object IntellicheckConsumer extends LoggerClass {
     val obj = IntellicheckConsumerClass(servers, topics, groupid, schemaRegestry = schemaregestry)
     val prop = obj.getProp()
     info("starting Consumer class to consume records from kafka brokers")
-    obj.consume(prop, spark, jprops = jobproperties, env = env)
+    try
+    {
+      obj.TruncTeradata(jobproperties,env )
+      obj.consume(prop, spark, jprops = jobproperties, env = env)
+    }
+    catch{
+      case e: Exception => e.printStackTrace
+    }
+    finally
+    {
+      info("No new records found to consume")
+    }
 
   }
 }
